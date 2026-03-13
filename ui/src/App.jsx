@@ -242,6 +242,7 @@ function InstanceCard({ inst, onRefresh }) {
       <div style={{ padding:'14px 16px 10px', display:'flex', alignItems:'center', gap:8 }}>
         <Dot color={sc} pulse={inst.tmuxRunning && !inst.kibanaHealth.up} />
         <span style={{ fontWeight:700, fontSize:13, color:'#ddeeff', flex:1 }}>{inst.name}</span>
+        {inst.privLocationRunning && <Badge label="priv loc ●" color="#ffd166" bg="rgba(255,209,102,0.12)" border="rgba(255,209,102,0.3)" />}
         <Badge label={inst.type} color={typeColor(inst.type)}
           bg={inst.type==='permanent' ? 'rgba(77,184,255,0.1)' : 'rgba(255,209,102,0.1)'}
           border={inst.type==='permanent' ? 'rgba(77,184,255,0.25)' : 'rgba(255,209,102,0.25)'} />
@@ -256,10 +257,14 @@ function InstanceCard({ inst, onRefresh }) {
       <div style={{ borderTop:'1px solid #1e2836', padding:'10px 16px', display:'flex', flexWrap:'wrap', gap:6 }}>
         {inst.kibanaHealth.up && <ActionBtn label="open" onClick={() => window.open(inst.url, '_blank')} />}
         <ActionBtn label="cursor" onClick={() => api.post(`/instances/${encodeURIComponent(inst.name)}/open`, {})} />
-        {!inst.tmuxRunning && <ActionBtn label="start" loading={busy==='start'} onClick={() => act('start', () => api.post(`/instances/${encodeURIComponent(inst.name)}/start`, {}))} />}
-        {inst.tmuxRunning && <ActionBtn label="stop" loading={busy==='stop'} onClick={() => act('stop', () => api.post(`/instances/${encodeURIComponent(inst.name)}/stop`, {}))} />}
+        {!inst.tmuxRunning && !inst.privLocationRunning && <ActionBtn label="start" loading={busy==='start'} onClick={() => act('start', () => api.post(`/instances/${encodeURIComponent(inst.name)}/start`, {}))} />}
+        {inst.tmuxRunning && !inst.privLocationRunning && <ActionBtn label="stop" loading={busy==='stop'} onClick={() => act('stop', () => api.post(`/instances/${encodeURIComponent(inst.name)}/stop`, {}))} />}
         {isFeat && <SwitchButton onSwitch={branch => act('switch', () => api.post('/instances/switch', { branch }))} busy={busy==='switch'} />}
         {!isPermanent && <ActionBtn danger label="kill" loading={busy==='kill'} onClick={() => act('kill', () => api.delete(`/instances/${encodeURIComponent(inst.branch)}`))} />}
+        {!inst.privLocationRunning
+          ? <ActionBtn label="▶ priv location" loading={busy==='privloc-start'} onClick={() => { setShowLogs(true); act('privloc-start', () => api.post(`/instances/${encodeURIComponent(inst.name)}/private-location/start`, {})); }} />
+          : <ActionBtn danger label="■ stop priv loc" loading={busy==='privloc-stop'} onClick={() => act('privloc-stop', () => api.post(`/instances/${encodeURIComponent(inst.name)}/private-location/stop`, {}))} />
+        }
         <ActionBtn label={showLogs ? 'hide logs' : 'logs'} onClick={() => setShowLogs(l => !l)} />
       </div>
       {log && <pre style={{ margin:'0 16px 8px', padding:'6px 10px', background:'#060810', border:'1px solid #1e2836', borderRadius:6, fontSize:10, color: log.toLowerCase().includes('error') ? '#e87070' : '#4db8ff', whiteSpace:'pre-wrap', wordBreak:'break-all', maxHeight:80, overflowY:'auto' }}>{log}</pre>}

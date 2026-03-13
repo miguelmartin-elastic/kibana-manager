@@ -37,4 +37,5 @@ export interface InstanceView {
   kibanaHealth: KibanaHealth;
   url: string;
   dir: string;
+  privLocationRunning: boolean;
 }

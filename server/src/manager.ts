@@ -27,6 +27,7 @@ interface InstanceRuntime {
   status: InstanceStatus;
   esProcess: ChildProcess | null;
   kibanaProcess: ChildProcess | null;
+  privateLocationProcess: ChildProcess | null;
   logs: string[];
   kibanaHealth: KibanaHealth;
   esStartupTimer: ReturnType<typeof setTimeout> | null;
@@ -127,6 +128,83 @@ function killProcess(proc: ChildProcess): Promise<void> {
   });
 }
 
+const PRIV_LOCATION_FLEET_CONFIG = (esPort: number) => `
+# Private Location Fleet config (added by kibana-manager — do not edit manually)
+xpack.fleet.agentPolicies:
+  - name: Fleet Server policy
+    id: fleet-server-policy
+    is_default_fleet_server: true
+    description: Fleet server policy
+    namespace: default
+    package_policies:
+      - name: Fleet Server
+        package:
+          name: fleet_server
+        inputs:
+          - type: fleet-server
+            keep_enabled: true
+            vars:
+              - name: host
+                value: 0.0.0.0
+                frozen: true
+              - name: port
+                value: 8220
+                frozen: true
+
+xpack.fleet.fleetServerHosts:
+  - id: default-fleet-server
+    name: Default Fleet server
+    is_default: true
+    host_urls: ['https://host.docker.internal:8220']
+
+xpack.fleet.outputs:
+  - id: es-default-output
+    name: Default output
+    type: elasticsearch
+    is_default: true
+    is_default_monitoring: true
+    hosts: ['http://host.docker.internal:${esPort}']
+
+xpack.fleet.packages:
+  - name: fleet_server
+    version: latest
+`;
+
+function patchKibanaDevYml(dir: string, esPort: number): void {
+  const configPath = path.join(dir, 'config', 'kibana.dev.yml');
+  const backupPath = `${configPath}.kibana-manager-backup`;
+
+  // Use existing backup as base (idempotent re-patch)
+  const sourcePath = fs.existsSync(backupPath) ? backupPath : configPath;
+  let original = '';
+  if (fs.existsSync(sourcePath)) {
+    original = fs.readFileSync(sourcePath, 'utf8');
+  }
+
+  // Save backup of original (only once)
+  if (!fs.existsSync(backupPath)) {
+    fs.writeFileSync(backupPath, original, 'utf8');
+  }
+
+  // Comment out all non-empty, non-comment lines
+  const commented = original.split('\n').map(line => {
+    if (line.trim() === '' || line.trim().startsWith('#')) return line;
+    return `# ${line}`;
+  }).join('\n');
+
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, commented + PRIV_LOCATION_FLEET_CONFIG(esPort), 'utf8');
+}
+
+function restoreKibanaDevYml(dir: string): void {
+  const configPath = path.join(dir, 'config', 'kibana.dev.yml');
+  const backupPath = `${configPath}.kibana-manager-backup`;
+  if (fs.existsSync(backupPath)) {
+    fs.writeFileSync(configPath, fs.readFileSync(backupPath, 'utf8'), 'utf8');
+    fs.rmSync(backupPath);
+  }
+}
+
 function buildEnv(nodeBinDir: string): NodeJS.ProcessEnv {
   return {
     ...process.env,
@@ -169,6 +247,7 @@ export class InstanceManager {
         status: 'stopped',
         esProcess: null,
         kibanaProcess: null,
+        privateLocationProcess: null,
         logs: [],
         kibanaHealth: { up: false, status: 'down', version: null },
         esStartupTimer: null,
@@ -183,9 +262,10 @@ export class InstanceManager {
           status: 'stopped',
           esProcess: null,
           kibanaProcess: null,
+          privateLocationProcess: null,
           logs: [],
           kibanaHealth: { up: false, status: 'down', version: null },
-        esStartupTimer: null,
+          esStartupTimer: null,
         });
       }
     }
@@ -446,6 +526,12 @@ export class InstanceManager {
 
     const kills: Promise<void>[] = [];
 
+    if (runtime.privateLocationProcess) {
+      const proc = runtime.privateLocationProcess;
+      runtime.privateLocationProcess = null;
+      kills.push(killProcess(proc));
+    }
+
     if (runtime.kibanaProcess) {
       const proc = runtime.kibanaProcess;
       runtime.kibanaProcess = null;
@@ -575,6 +661,7 @@ export class InstanceManager {
       status: 'stopped',
       esProcess: null,
       kibanaProcess: null,
+      privateLocationProcess: null,
       logs: [],
       kibanaHealth: { up: false, status: 'down', version: null },
       esStartupTimer: null,
@@ -673,11 +760,115 @@ export class InstanceManager {
     return `Killed instance '${name}' and removed worktree at '${worktreeDir}'`;
   }
 
+  async startPrivateLocation(name: string): Promise<string> {
+    const runtime = this.runtimes.get(name);
+    if (!runtime) throw new Error(`Instance '${name}' not found`);
+
+    if (runtime.privateLocationProcess) {
+      return `Private location already running for '${name}'`;
+    }
+
+    // Patch kibana.dev.yml with Fleet config (backs up original automatically)
+    patchKibanaDevYml(runtime.config.dir, runtime.config.esPort);
+    pushLog(runtime, '[priv-location] Patched kibana.dev.yml with Fleet config');
+
+    // Restart Kibana so it picks up the new config
+    if (runtime.status !== 'stopped') {
+      pushLog(runtime, '[priv-location] Stopping instance to apply Fleet config…');
+      await this.stop(name);
+    }
+
+    // start() fires bootstrap then ES then Kibana (fire-and-forget)
+    void this.start(name);
+
+    // Wait for Kibana to be healthy, then launch the private location script
+    this.waitAndRunPrivateLocation(runtime);
+
+    return `Private location setup started for '${name}' — check logs`;
+  }
+
+  async stopPrivateLocation(name: string): Promise<string> {
+    const runtime = this.runtimes.get(name);
+    if (!runtime) throw new Error(`Instance '${name}' not found`);
+
+    if (runtime.privateLocationProcess) {
+      await killProcess(runtime.privateLocationProcess);
+      runtime.privateLocationProcess = null;
+    }
+
+    restoreKibanaDevYml(runtime.config.dir);
+    pushLog(runtime, '[priv-location] Stopped. kibana.dev.yml restored to original.');
+
+    return `Stopped private location for '${name}'`;
+  }
+
+  private async waitAndRunPrivateLocation(runtime: InstanceRuntime): Promise<void> {
+    pushLog(runtime, '[priv-location] Waiting for Kibana to be ready…');
+
+    const MAX_WAIT_MS = 10 * 60 * 1000;
+    const POLL_MS = 5000;
+    const deadline = Date.now() + MAX_WAIT_MS;
+
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, POLL_MS));
+
+      if (runtime.status === 'stopped' || runtime.status === 'error') {
+        pushLog(runtime, '[priv-location] Aborted: instance stopped before Kibana was ready');
+        return;
+      }
+
+      const health = await checkKibanaHealth(runtime.config.kPort);
+      if (health.up) break;
+
+      if (Date.now() + POLL_MS >= deadline) {
+        pushLog(runtime, '[priv-location] Timed out waiting for Kibana to be ready');
+        return;
+      }
+    }
+
+    pushLog(runtime, '[priv-location] Kibana is up — launching synthetics_private_location.js…');
+    pushLog(runtime, '[priv-location] Make sure Docker Desktop is running!');
+
+    const nodeBinDir = resolveNodeBin(runtime.config.dir);
+    const env = buildEnv(nodeBinDir);
+
+    const proc = spawn('node', ['x-pack/scripts/synthetics_private_location.js'], {
+      cwd: runtime.config.dir,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    runtime.privateLocationProcess = proc;
+
+    let stdoutBuf = '';
+    proc.stdout?.on('data', (chunk: Buffer) => {
+      stdoutBuf += chunk.toString();
+      const lines = stdoutBuf.split('\n');
+      stdoutBuf = lines.pop() ?? '';
+      for (const line of lines) pushLog(runtime, `[priv-location] ${line}`);
+    });
+
+    let stderrBuf = '';
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      stderrBuf += chunk.toString();
+      const lines = stderrBuf.split('\n');
+      stderrBuf = lines.pop() ?? '';
+      for (const line of lines) pushLog(runtime, `[priv-location:err] ${line}`);
+    });
+
+    proc.on('exit', (code, signal) => {
+      if (stdoutBuf) pushLog(runtime, `[priv-location] ${stdoutBuf}`);
+      if (stderrBuf) pushLog(runtime, `[priv-location:err] ${stderrBuf}`);
+      pushLog(runtime, `[priv-location] Script exited (code=${code}, signal=${signal})`);
+      runtime.privateLocationProcess = null;
+    });
+  }
+
   getInstances(): InstanceView[] {
     const views: InstanceView[] = [];
 
     for (const [, runtime] of this.runtimes) {
-      const { config, status, esProcess, kibanaProcess, kibanaHealth } = runtime;
+      const { config, status, esProcess, kibanaProcess, kibanaHealth, privateLocationProcess } = runtime;
       views.push({
         name: config.name,
         type: config.type,
@@ -691,6 +882,7 @@ export class InstanceManager {
         kibanaHealth,
         url: `http://localhost:${config.kPort}`,
         dir: config.dir,
+        privLocationRunning: privateLocationProcess !== null,
       });
     }
 
