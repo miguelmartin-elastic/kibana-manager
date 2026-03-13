@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+server/node_modules/
+ui/node_modules/
+
+# Build output
+ui/dist/
+server/dist/
+
+# Environment & secrets
+.env
+.env.*
+*.local
+~/.kibana-manager-settings.json
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# TypeScript
+*.tsbuildinfo

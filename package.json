@@ -1,0 +1,9 @@
+{
+  "name": "kibana-manager",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "npm run dev:server & npm run dev:ui",
+    "dev:server": "npm start --prefix server",
+    "dev:ui": "npm run dev --prefix ui"
+  }
+}
