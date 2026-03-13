@@ -21,6 +21,9 @@ npm-debug.log*
 .DS_Store
 Thumbs.db
 
+# Claude Code local settings
+.claude/
+
 # Editor
 .vscode/
 .idea/

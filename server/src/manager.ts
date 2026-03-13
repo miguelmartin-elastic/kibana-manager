@@ -230,6 +230,12 @@ export class InstanceManager {
     runtime.logs = [];
     runtime.kibanaHealth = { up: false, status: 'down', version: null };
 
+    // Always bootstrap before starting (fire-and-forget)
+    this.bootstrapThenStart(runtime).catch(() => {});
+    return `Starting ${name} (running yarn kbn bootstrap first — check logs)...`;
+  }
+
+  private spawnEs(runtime: InstanceRuntime): void {
     // Remove stale ES lock files (Java leaves these behind when killed uncleanly)
     const esDataPath = path.join(ES_DATA_DIR, runtime.config.esDataFolder);
     const removeStaleLocks = (dir: string) => {
@@ -346,8 +352,6 @@ export class InstanceManager {
         runtime.status = 'error';
       }
     });
-
-    return `Starting ES for ${name} on :${esPort} (Kibana will start on :${kPort} after ES is ready)...`;
   }
 
   private async startKibana(runtime: InstanceRuntime): Promise<void> {
@@ -579,14 +583,13 @@ export class InstanceManager {
     this.runtimes.set(name, runtime);
     this.persistTemporaryInstances();
 
-    // Always bootstrap before starting (fire-and-forget, progress visible in logs)
-    this.bootstrapThenStart(runtime);
+    // start() sets status + fires bootstrap (fire-and-forget)
+    void this.start(name);
     return `Created instance '${name}' on Kibana :${kPort} / ES :${esPort} — running yarn kbn bootstrap (check logs)`;
   }
 
   private async bootstrapThenStart(runtime: InstanceRuntime): Promise<void> {
-    runtime.status = 'starting-es'; // show activity in UI
-
+    // runtime.status is already 'starting-es' (set by start())
     const nodeBinDir = resolveNodeBin(runtime.config.dir);
     const env = buildEnv(nodeBinDir);
 
@@ -623,8 +626,10 @@ export class InstanceManager {
       });
     });
 
-    runtime.status = 'stopped';
-    await this.start(runtime.config.name);
+    // If stop() was called while bootstrapping, don't spawn processes
+    if (runtime.status === 'stopped') return;
+
+    this.spawnEs(runtime);
   }
 
   private persistTemporaryInstances(): void {
