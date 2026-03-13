@@ -79,6 +79,22 @@ app.delete(/^\/api\/instances\/(.+)$/, async (req: Request, res: Response) => {
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
+// POST /api/instances/<name>/private-location/start  (must be before generic /start)
+app.post(/^\/api\/instances\/(.+)\/private-location\/start$/, async (req: Request, res: Response) => {
+  try {
+    const name = decodeURIComponent((req.params as any)[0]);
+    res.json({ ok: true, output: await manager.startPrivateLocation(name) });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/instances/<name>/private-location/stop  (must be before generic /stop)
+app.post(/^\/api\/instances\/(.+)\/private-location\/stop$/, async (req: Request, res: Response) => {
+  try {
+    const name = decodeURIComponent((req.params as any)[0]);
+    res.json({ ok: true, output: await manager.stopPrivateLocation(name) });
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
+});
+
 // POST /api/instances/<name>/start
 app.post(/^\/api\/instances\/(.+)\/start$/, async (req: Request, res: Response) => {
   try {
@@ -104,22 +120,6 @@ app.post(/^\/api\/instances\/(.+)\/open$/, (req: Request, res: Response) => {
     const { spawn } = require('child_process');
     spawn('cursor', [inst.dir], { detached: true, stdio: 'ignore' }).unref();
     res.json({ ok: true });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
-});
-
-// POST /api/instances/<name>/private-location/start
-app.post(/^\/api\/instances\/(.+)\/private-location\/start$/, async (req: Request, res: Response) => {
-  try {
-    const name = decodeURIComponent((req.params as any)[0]);
-    res.json({ ok: true, output: await manager.startPrivateLocation(name) });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
-});
-
-// POST /api/instances/<name>/private-location/stop
-app.post(/^\/api\/instances\/(.+)\/private-location\/stop$/, async (req: Request, res: Response) => {
-  try {
-    const name = decodeURIComponent((req.params as any)[0]);
-    res.json({ ok: true, output: await manager.stopPrivateLocation(name) });
   } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
