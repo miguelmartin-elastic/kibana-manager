@@ -832,7 +832,11 @@ export class InstanceManager {
     const nodeBinDir = resolveNodeBin(runtime.config.dir);
     const env = buildEnv(nodeBinDir);
 
-    const proc = spawn('node', ['x-pack/scripts/synthetics_private_location.js'], {
+    const proc = spawn('node', [
+      'x-pack/scripts/synthetics_private_location.js',
+      `--kibana-url=http://localhost:${runtime.config.kPort}`,
+      `--elasticsearch-host=http://localhost:${runtime.config.esPort}`,
+    ], {
       cwd: runtime.config.dir,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
