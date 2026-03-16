@@ -1,5 +1,9 @@
 # Kibana Manager
 
+| Monitor different isntances | Add new instances, auto-fix using AI  |
+|---|---|
+| ![](./media/ss_00.png)  | ![](./media/ss_01.png) |
+
 Local dashboard for managing multiple Kibana + Elasticsearch instances from the [Elastic Kibana](https://github.com/elastic/kibana) repository.
 
 Built with **Express** (TypeScript) and **React** (Vite).
