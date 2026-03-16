@@ -361,7 +361,7 @@ export default function App() {
   const [lastPoll,     setLastPoll]     = useState(null);
   const load = useCallback(async () => {
     try { const data = await api.get('/instances'); setInstances(data.instances ?? []); setError(null); }
-    catch { setError('Cannot reach server on :3001 — is server.js running?'); }
+    catch { setError('Cannot reach server on :3001 — is the server running?'); }
     finally { setLoading(false); setLastPoll(new Date()); }
   }, []);
 
