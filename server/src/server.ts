@@ -3,37 +3,12 @@ import cors from 'cors';
 import { manager } from './manager';
 import { API_PORT } from './config';
 import { analyzeLogsStream, applyProposalStream, Proposal } from './analyzer';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
 
 const pendingProposals = new Map<string, Proposal>();
-
-const SETTINGS_FILE = path.join(os.homedir(), '.kibana-manager-settings.json');
-
-function readSettings(): Record<string, string> {
-  try { return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')); }
-  catch { return {}; }
-}
-function writeSettings(s: Record<string, string>): void {
-  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(s, null, 2), 'utf8');
-}
-
-const _boot = readSettings();
-if (_boot.anthropicApiKey) process.env.ANTHROPIC_API_KEY = _boot.anthropicApiKey;
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// Helper: extract the segment(s) after a prefix, supporting slashes in the value
-// e.g. prefix='/api/instances/', suffix='/start' → name from '/api/instances/foo/bar/start'
-function extractParam(req: Request, prefix: string, suffix = ''): string {
-  const raw = decodeURIComponent(req.path);
-  const start = prefix.length;
-  const end = suffix ? raw.lastIndexOf(suffix) : raw.length;
-  return raw.slice(start, end);
-}
 
 // GET /api/instances
 app.get('/api/instances', (_req, res: Response) => {
@@ -147,23 +122,6 @@ app.post(/^\/api\/instances\/(.+)\/apply$/, async (req: Request, res: Response) 
   if (!proposal) { res.status(400).json({ error: 'No pending proposal. Run analyze first.' }); return; }
   await applyProposalStream(proposal, res);
   pendingProposals.delete(name);
-});
-
-// GET /api/settings
-app.get('/api/settings', (_req, res: Response) => {
-  res.json({ anthropicApiKeySet: !!readSettings().anthropicApiKey });
-});
-
-// POST /api/settings
-app.post('/api/settings', (req: Request, res: Response) => {
-  const { anthropicApiKey } = req.body as { anthropicApiKey?: string };
-  const s = readSettings();
-  if (anthropicApiKey !== undefined) {
-    s.anthropicApiKey = anthropicApiKey;
-    process.env.ANTHROPIC_API_KEY = anthropicApiKey;
-  }
-  writeSettings(s);
-  res.json({ ok: true });
 });
 
 // GET /api/git/branches

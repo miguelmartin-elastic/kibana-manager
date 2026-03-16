@@ -354,78 +354,11 @@ function StopAllButton({ onDone }) {
   );
 }
 
-function SettingsPage({ onClose }) {
-  const [key,    setKey]    = useState('');
-  const [keySet, setKeySet] = useState(false);
-  const [saved,  setSaved]  = useState(false);
-  const [busy,   setBusy]   = useState(false);
-
-  useEffect(() => {
-    api.get('/settings').then(r => setKeySet(r.anthropicApiKeySet));
-  }, []);
-
-  async function save() {
-    if (!key.trim()) return;
-    setBusy(true);
-    await api.post('/settings', { anthropicApiKey: key.trim() });
-    setKeySet(true);
-    setSaved(true);
-    setKey('');
-    setBusy(false);
-    setTimeout(() => setSaved(false), 2000);
-  }
-
-  async function clear() {
-    await api.post('/settings', { anthropicApiKey: '' });
-    setKeySet(false);
-  }
-
-  return (
-    <div style={{ minHeight:'100vh', background:'#080b10', fontFamily:'JetBrains Mono, monospace', color:'#8fa8c0' }}>
-      <div style={{ borderBottom:'1px solid #1e2836', padding:'14px 28px', display:'flex', alignItems:'center', gap:12 }}>
-        <button onClick={onClose} style={{ background:'none', border:'none', color:'#3d5060', cursor:'pointer', fontSize:16, padding:'0 4px', fontFamily:'JetBrains Mono, monospace' }}
-          onMouseEnter={e => e.target.style.color='#8fa8c0'} onMouseLeave={e => e.target.style.color='#3d5060'}>←</button>
-        <div style={{ fontFamily:'Syne, sans-serif', fontWeight:800, fontSize:18, color:'#ddeeff', letterSpacing:'-0.02em' }}>Settings</div>
-      </div>
-      <div style={{ padding:'32px 28px', maxWidth:600 }}>
-        <div style={{ background:'#0f1318', border:'1px solid #1e2836', borderRadius:10, padding:'20px 24px' }}>
-          <div style={{ fontSize:12, fontWeight:700, color:'#ddeeff', marginBottom:4 }}>Anthropic API Key</div>
-          <div style={{ fontSize:11, color:'#3d5060', marginBottom:16 }}>
-            Required for the "fix with claude" feature. Get yours at{' '}
-            <span style={{ color:'#4db8ff' }}>console.anthropic.com</span>
-          </div>
-
-          {keySet && (
-            <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:12, padding:'8px 12px', background:'rgba(61,220,132,0.08)', border:'1px solid rgba(61,220,132,0.2)', borderRadius:6 }}>
-              <span style={{ fontSize:10, color:'#3ddc84', flex:1 }}>✓ API key is set</span>
-              <ActionBtn danger label="clear" onClick={clear} />
-            </div>
-          )}
-
-          <div style={{ display:'flex', gap:8 }}>
-            <input
-              type="password"
-              placeholder="sk-ant-api03-…"
-              value={key}
-              onChange={e => setKey(e.target.value)}
-              onKeyDown={e => e.key === 'Enter' && save()}
-              style={{ flex:1, background:'#060810', border:'1px solid #253040', borderRadius:5, color:'#ddeeff', fontSize:11, padding:'7px 10px', fontFamily:'JetBrains Mono, monospace', outline:'none' }}
-            />
-            <ActionBtn label={saved ? 'saved ✓' : 'save'} loading={busy} onClick={save} disabled={!key.trim()} />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export default function App() {
   const [instances,    setInstances]    = useState([]);
   const [loading,      setLoading]      = useState(true);
   const [error,        setError]        = useState(null);
   const [lastPoll,     setLastPoll]     = useState(null);
-  const [showSettings, setShowSettings] = useState(false);
-
   const load = useCallback(async () => {
     try { const data = await api.get('/instances'); setInstances(data.instances ?? []); setError(null); }
     catch { setError('Cannot reach server on :3001 — is server.js running?'); }
@@ -436,8 +369,6 @@ export default function App() {
 
   const running = instances.filter(i => i.tmuxRunning).length;
   const healthy = instances.filter(i => i.kibanaHealth.up).length;
-
-  if (showSettings) return <SettingsPage onClose={() => setShowSettings(false)} />;
 
   return (
     <div style={{ minHeight:'100vh', background:'#080b10', fontFamily:'JetBrains Mono, monospace', color:'#8fa8c0' }}>
@@ -461,8 +392,6 @@ export default function App() {
         <button onClick={load} style={{ background:'none', border:'1px solid #1e2836', borderRadius:6, color:'#3d5060', padding:'5px 10px', cursor:'pointer', fontSize:11, fontFamily:'JetBrains Mono, monospace' }}
           onMouseEnter={e => e.target.style.color='#8fa8c0'} onMouseLeave={e => e.target.style.color='#3d5060'}>↻ refresh</button>
         {running > 0 && <StopAllButton onDone={load} />}
-        <button onClick={() => setShowSettings(true)} style={{ background:'none', border:'1px solid #1e2836', borderRadius:6, color:'#3d5060', padding:'5px 10px', cursor:'pointer', fontSize:11, fontFamily:'JetBrains Mono, monospace' }}
-          onMouseEnter={e => e.target.style.color='#8fa8c0'} onMouseLeave={e => e.target.style.color='#3d5060'}>⚙ settings</button>
       </div>
       <div style={{ padding:'24px 28px', maxWidth:1400 }}>
         {loading && <div style={{ color:'#3d5060', fontSize:12 }}>loading…</div>}
