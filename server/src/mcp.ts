@@ -21,80 +21,90 @@ const server = new McpServer({
   version: '1.0.0',
 });
 
-server.tool(
+server.registerTool(
   'list_instances',
-  'List all Kibana/ES instances with their current status, ports, and health.',
-  {},
+  { description: 'List all Kibana/ES instances with their current status, ports, and health.' },
   async () => {
     const data = await api('GET', '/instances');
     return { content: [{ type: 'text', text: JSON.stringify(data.instances, null, 2) }] };
   }
 );
 
-server.tool(
+server.registerTool(
   'create_instance',
-  'Create a new temporary Kibana+ES instance from a git branch. Returns the instance name to use with other tools.',
-  { branch: z.string().describe('Git branch name to create the instance from') },
+  {
+    description: 'Create a new temporary Kibana+ES instance from a git branch. Returns the instance name to use with other tools.',
+    inputSchema: { branch: z.string().describe('Git branch name to create the instance from') },
+  },
   async ({ branch }) => {
     const data = await api('POST', '/instances/new', { branch });
     return { content: [{ type: 'text', text: data.output }] };
   }
 );
 
-server.tool(
+server.registerTool(
   'start_instance',
-  'Start an instance (boots Elasticsearch then Kibana). This takes several minutes on first run due to bootstrap.',
-  { name: z.string().describe('Instance name (e.g. "kibana-feat", "kibana-main", or a temporary instance name)') },
+  {
+    description: 'Start an instance (boots Elasticsearch then Kibana). This takes several minutes on first run due to bootstrap.',
+    inputSchema: { name: z.string().describe('Instance name (e.g. "kibana-feat", "kibana-main", or a temporary instance name)') },
+  },
   async ({ name }) => {
     const data = await api('POST', `/instances/${encodeURIComponent(name)}/start`);
     return { content: [{ type: 'text', text: data.output }] };
   }
 );
 
-server.tool(
+server.registerTool(
   'stop_instance',
-  'Stop a running instance (gracefully terminates ES and Kibana processes).',
-  { name: z.string().describe('Instance name') },
+  {
+    description: 'Stop a running instance (gracefully terminates ES and Kibana processes).',
+    inputSchema: { name: z.string().describe('Instance name') },
+  },
   async ({ name }) => {
     const data = await api('POST', `/instances/${encodeURIComponent(name)}/stop`);
     return { content: [{ type: 'text', text: data.output }] };
   }
 );
 
-server.tool(
+server.registerTool(
   'kill_instance',
-  'Permanently remove a temporary instance: stops it, deletes the git worktree and ES data. Cannot be used on permanent instances (kibana-feat, kibana-main).',
-  { name: z.string().describe('Temporary instance name to remove') },
+  {
+    description: 'Permanently remove a temporary instance: stops it, deletes the git worktree and ES data. Cannot be used on permanent instances (kibana-feat, kibana-main).',
+    inputSchema: { name: z.string().describe('Temporary instance name to remove') },
+  },
   async ({ name }) => {
     const data = await api('DELETE', `/instances/${encodeURIComponent(name)}`);
     return { content: [{ type: 'text', text: data.output }] };
   }
 );
 
-server.tool(
+server.registerTool(
   'switch_branch',
-  'Switch the persistent kibana-feat instance to a different git branch.',
-  { branch: z.string().describe('Git branch name to switch to') },
+  {
+    description: 'Switch the persistent kibana-feat instance to a different git branch.',
+    inputSchema: { branch: z.string().describe('Git branch name to switch to') },
+  },
   async ({ branch }) => {
     const data = await api('POST', '/instances/switch', { branch });
     return { content: [{ type: 'text', text: data.output }] };
   }
 );
 
-server.tool(
+server.registerTool(
   'get_logs',
-  'Get the most recent logs (last 300 lines) for an instance.',
-  { name: z.string().describe('Instance name') },
+  {
+    description: 'Get the most recent logs (last 300 lines) for an instance.',
+    inputSchema: { name: z.string().describe('Instance name') },
+  },
   async ({ name }) => {
     const data = await api('GET', `/instances/${encodeURIComponent(name)}/logs`);
     return { content: [{ type: 'text', text: (data.logs as string[]).join('\n') }] };
   }
 );
 
-server.tool(
+server.registerTool(
   'list_branches',
-  'List all available git branches in the Kibana repository.',
-  {},
+  { description: 'List all available git branches in the Kibana repository.' },
   async () => {
     const data = await api('GET', '/git/branches');
     return { content: [{ type: 'text', text: (data.branches as string[]).join('\n') }] };
