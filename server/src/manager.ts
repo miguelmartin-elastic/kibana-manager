@@ -21,6 +21,7 @@ import {
 } from './config';
 import { resolveNodeBin } from './nvm';
 import { checkKibanaHealth } from './health';
+import { setupPrivateLocation, teardownPrivateLocation, areContainersRunning } from './private-location';
 
 interface InstanceRuntime {
   config: InstanceConfig;
@@ -28,6 +29,7 @@ interface InstanceRuntime {
   esProcess: ChildProcess | null;
   kibanaProcess: ChildProcess | null;
   privateLocationProcess: ChildProcess | null;
+  privateLocationEnabled: boolean;
   logs: string[];
   kibanaHealth: KibanaHealth;
   esStartupTimer: ReturnType<typeof setTimeout> | null;
@@ -66,9 +68,13 @@ function pushLog(runtime: InstanceRuntime, line: string): void {
   }
 }
 
-function nextFreePort(startPort: number): Promise<number> {
-  return new Promise((resolve, reject) => {
+function nextFreePort(startPort: number, exclude: Set<number> = new Set()): Promise<number> {
+  return new Promise((resolve) => {
     const tryPort = (port: number) => {
+      if (exclude.has(port)) {
+        tryPort(port + 1);
+        return;
+      }
       const server = net.createServer();
       server.once('error', () => {
         tryPort(port + 1);
@@ -215,6 +221,9 @@ function buildEnv(nodeBinDir: string): NodeJS.ProcessEnv {
 export class InstanceManager {
   private runtimes: Map<string, InstanceRuntime> = new Map();
   private healthPollTimer: ReturnType<typeof setInterval> | null = null;
+  private bootstrapConcurrency = 2;
+  private bootstrapRunning = 0;
+  private bootstrapWaiters: Array<() => void> = [];
 
   constructor() {
     const state = readState();
@@ -248,6 +257,7 @@ export class InstanceManager {
         esProcess: null,
         kibanaProcess: null,
         privateLocationProcess: null,
+        privateLocationEnabled: false,
         logs: [],
         kibanaHealth: { up: false, status: 'down', version: null },
         esStartupTimer: null,
@@ -263,6 +273,7 @@ export class InstanceManager {
           esProcess: null,
           kibanaProcess: null,
           privateLocationProcess: null,
+          privateLocationEnabled: false,
           logs: [],
           kibanaHealth: { up: false, status: 'down', version: null },
           esStartupTimer: null,
@@ -310,8 +321,8 @@ export class InstanceManager {
     runtime.logs = [];
     runtime.kibanaHealth = { up: false, status: 'down', version: null };
 
-    // Always bootstrap before starting (fire-and-forget)
-    this.bootstrapThenStart(runtime).catch(() => {});
+    // Limit concurrent bootstraps so they don't OOM the machine
+    this.runWithConcurrencyLimit(() => this.bootstrapThenStart(runtime)).catch(() => {});
     return `Starting ${name} (running yarn kbn bootstrap first — check logs)...`;
   }
 
@@ -526,10 +537,18 @@ export class InstanceManager {
 
     const kills: Promise<void>[] = [];
 
+    // When privateLocationEnabled, keep Docker containers alive and yml patched
+    // so they reconnect automatically on next start. Only kill the log-tailing
+    // process handle (not the actual containers).
     if (runtime.privateLocationProcess) {
       const proc = runtime.privateLocationProcess;
       runtime.privateLocationProcess = null;
-      kills.push(killProcess(proc));
+      if (!runtime.privateLocationEnabled) {
+        kills.push(killProcess(proc));
+      } else {
+        // Just detach our process handle; Docker containers keep running
+        try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+      }
     }
 
     if (runtime.kibanaProcess) {
@@ -614,8 +633,12 @@ export class InstanceManager {
       return `Starting existing instance '${name}' on Kibana :${kPort} / ES :${esPort}`;
     }
 
-    const kPort = await nextFreePort(5603);
-    const esPort = await nextFreePort(9202);
+    const usedPorts = new Set(
+      Array.from(this.runtimes.values()).flatMap(r => [r.config.kPort, r.config.esPort])
+    );
+    const kPort = await nextFreePort(5603, usedPorts);
+    usedPorts.add(kPort);
+    const esPort = await nextFreePort(9202, usedPorts);
 
     // Resolve the actual worktree directory (may already exist elsewhere on disk)
     let resolvedDir = worktreeDir;
@@ -662,6 +685,7 @@ export class InstanceManager {
       esProcess: null,
       kibanaProcess: null,
       privateLocationProcess: null,
+      privateLocationEnabled: false,
       logs: [],
       kibanaHealth: { up: false, status: 'down', version: null },
       esStartupTimer: null,
@@ -673,6 +697,19 @@ export class InstanceManager {
     // start() sets status + fires bootstrap (fire-and-forget)
     void this.start(name);
     return `Created instance '${name}' on Kibana :${kPort} / ES :${esPort} — running yarn kbn bootstrap (check logs)`;
+  }
+
+  private async runWithConcurrencyLimit(fn: () => Promise<void>): Promise<void> {
+    if (this.bootstrapRunning >= this.bootstrapConcurrency) {
+      await new Promise<void>(resolve => this.bootstrapWaiters.push(resolve));
+    }
+    this.bootstrapRunning++;
+    try {
+      await fn();
+    } finally {
+      this.bootstrapRunning--;
+      this.bootstrapWaiters.shift()?.();
+    }
   }
 
   private async bootstrapThenStart(runtime: InstanceRuntime): Promise<void> {
@@ -717,6 +754,95 @@ export class InstanceManager {
     if (runtime.status === 'stopped') return;
 
     this.spawnEs(runtime);
+
+    // If private location was enabled before stop, restore it after Kibana is healthy
+    if (runtime.privateLocationEnabled) {
+      this.restorePrivateLocation(runtime);
+    }
+  }
+
+  private async restorePrivateLocation(runtime: InstanceRuntime): Promise<void> {
+    pushLog(runtime, '[priv-location] Private location enabled — will verify after Kibana is healthy…');
+
+    const MAX_WAIT_MS = 10 * 60 * 1000;
+    const POLL_MS = 5000;
+    const deadline = Date.now() + MAX_WAIT_MS;
+
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, POLL_MS));
+
+      if (runtime.status === 'stopped' || runtime.status === 'error') {
+        pushLog(runtime, '[priv-location] Aborted restore: instance stopped or errored');
+        return;
+      }
+
+      const health = await checkKibanaHealth(runtime.config.kPort);
+      if (health.up) break;
+
+      if (Date.now() + POLL_MS >= deadline) {
+        pushLog(runtime, '[priv-location] Timed out waiting for Kibana to restore private location');
+        return;
+      }
+    }
+
+    // Docker containers should still be running from before stop()
+    if (areContainersRunning(runtime.config.name)) {
+      pushLog(runtime, '[priv-location] Docker containers still running — private location restored');
+      // Attach a log-tailing process so the UI shows the badge
+      const { spawn: nodeSpawn } = require('child_process') as typeof import('child_process');
+      const containerName = `km-${runtime.config.name.replace(/[^a-zA-Z0-9_.-]/g, '-')}-agent`;
+      runtime.privateLocationProcess = nodeSpawn('docker', ['logs', '-f', containerName], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return;
+    }
+
+    // Containers died — re-setup via API + Docker
+    pushLog(runtime, '[priv-location] Docker containers not running — re-creating…');
+    const MAX_RETRIES = 5;
+    const RETRY_BASE_MS = 3000;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const { kPort, esPort } = runtime.config;
+        const result = await setupPrivateLocation(
+          runtime.config.name,
+          `http://localhost:${kPort}`,
+          `http://localhost:${esPort}`,
+          (msg) => pushLog(runtime, msg),
+        );
+        runtime.privateLocationProcess = result.agentProc;
+        this.pipeProcessLogs(result.fleetServerProc, runtime, 'fleet-server');
+        this.pipeProcessLogs(result.agentProc, runtime, 'agent');
+        return;
+      } catch (e: any) {
+        const isTransient = /ECONNRESET|ECONNREFUSED|ETIMEDOUT|socket hang up|not available with the current configuration/i.test(e.message);
+        if (isTransient && attempt < MAX_RETRIES) {
+          const delayMs = RETRY_BASE_MS * attempt;
+          pushLog(runtime, `[priv-location] Transient error (${e.message}), retrying in ${delayMs / 1000}s (attempt ${attempt}/${MAX_RETRIES})…`);
+          await new Promise(r => setTimeout(r, delayMs));
+          continue;
+        }
+        pushLog(runtime, `[priv-location] Failed to restore: ${e.message}`);
+        return;
+      }
+    }
+  }
+
+  private pipeProcessLogs(proc: ChildProcess, runtime: InstanceRuntime, label: string): void {
+    let stdoutBuf = '';
+    proc.stdout?.on('data', (chunk: Buffer) => {
+      stdoutBuf += chunk.toString();
+      const lines = stdoutBuf.split('\n');
+      stdoutBuf = lines.pop() ?? '';
+      for (const line of lines) pushLog(runtime, `[priv-location:${label}] ${line}`);
+    });
+    let stderrBuf = '';
+    proc.stderr?.on('data', (chunk: Buffer) => {
+      stderrBuf += chunk.toString();
+      const lines = stderrBuf.split('\n');
+      stderrBuf = lines.pop() ?? '';
+      for (const line of lines) pushLog(runtime, `[priv-location:${label}:err] ${line}`);
+    });
   }
 
   private persistTemporaryInstances(): void {
@@ -735,6 +861,13 @@ export class InstanceManager {
 
     const worktreeDir = runtime.config.dir;
     const isOwnedWorktree = worktreeDir.startsWith(WORKTREES_DIR);
+
+    // Clean up Docker containers before stopping (stop() preserves them when enabled)
+    if (runtime.privateLocationEnabled) {
+      runtime.privateLocationEnabled = false;
+      teardownPrivateLocation(name, (msg) => pushLog(runtime, msg));
+      restoreKibanaDevYml(runtime.config.dir);
+    }
 
     await this.stop(name);
     this.runtimes.delete(name);
@@ -764,9 +897,11 @@ export class InstanceManager {
     const runtime = this.runtimes.get(name);
     if (!runtime) throw new Error(`Instance '${name}' not found`);
 
-    if (runtime.privateLocationProcess) {
+    if (runtime.privateLocationEnabled && areContainersRunning(name)) {
       return `Private location already running for '${name}'`;
     }
+
+    runtime.privateLocationEnabled = true;
 
     // Patch kibana.dev.yml with Fleet config (backs up original automatically)
     patchKibanaDevYml(runtime.config.dir, runtime.config.esPort);
@@ -778,11 +913,9 @@ export class InstanceManager {
       await this.stop(name);
     }
 
-    // start() fires bootstrap then ES then Kibana (fire-and-forget)
+    // start() fires bootstrap then ES then Kibana; restorePrivateLocation() will
+    // handle the Docker containers + Kibana API setup once Kibana is healthy
     void this.start(name);
-
-    // Wait for Kibana to be healthy, then launch the private location script
-    this.waitAndRunPrivateLocation(runtime);
 
     return `Private location setup started for '${name}' — check logs`;
   }
@@ -791,88 +924,25 @@ export class InstanceManager {
     const runtime = this.runtimes.get(name);
     if (!runtime) throw new Error(`Instance '${name}' not found`);
 
+    runtime.privateLocationEnabled = false;
+
     if (runtime.privateLocationProcess) {
-      await killProcess(runtime.privateLocationProcess);
+      try { runtime.privateLocationProcess.kill('SIGTERM'); } catch { /* ignore */ }
       runtime.privateLocationProcess = null;
     }
 
+    teardownPrivateLocation(name, (msg) => pushLog(runtime, msg));
     restoreKibanaDevYml(runtime.config.dir);
-    pushLog(runtime, '[priv-location] Stopped. kibana.dev.yml restored to original.');
+    pushLog(runtime, '[priv-location] Stopped. Docker containers removed, kibana.dev.yml restored.');
 
     return `Stopped private location for '${name}'`;
-  }
-
-  private async waitAndRunPrivateLocation(runtime: InstanceRuntime): Promise<void> {
-    pushLog(runtime, '[priv-location] Waiting for Kibana to be ready…');
-
-    const MAX_WAIT_MS = 10 * 60 * 1000;
-    const POLL_MS = 5000;
-    const deadline = Date.now() + MAX_WAIT_MS;
-
-    while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, POLL_MS));
-
-      if (runtime.status === 'stopped' || runtime.status === 'error') {
-        pushLog(runtime, '[priv-location] Aborted: instance stopped before Kibana was ready');
-        return;
-      }
-
-      const health = await checkKibanaHealth(runtime.config.kPort);
-      if (health.up) break;
-
-      if (Date.now() + POLL_MS >= deadline) {
-        pushLog(runtime, '[priv-location] Timed out waiting for Kibana to be ready');
-        return;
-      }
-    }
-
-    pushLog(runtime, '[priv-location] Kibana is up — launching synthetics_private_location.js…');
-    pushLog(runtime, '[priv-location] Make sure Docker Desktop is running!');
-
-    const nodeBinDir = resolveNodeBin(runtime.config.dir);
-    const env = buildEnv(nodeBinDir);
-
-    const proc = spawn('node', [
-      'x-pack/scripts/synthetics_private_location.js',
-      `--kibana-url=http://localhost:${runtime.config.kPort}`,
-      `--elasticsearch-host=http://localhost:${runtime.config.esPort}`,
-    ], {
-      cwd: runtime.config.dir,
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    runtime.privateLocationProcess = proc;
-
-    let stdoutBuf = '';
-    proc.stdout?.on('data', (chunk: Buffer) => {
-      stdoutBuf += chunk.toString();
-      const lines = stdoutBuf.split('\n');
-      stdoutBuf = lines.pop() ?? '';
-      for (const line of lines) pushLog(runtime, `[priv-location] ${line}`);
-    });
-
-    let stderrBuf = '';
-    proc.stderr?.on('data', (chunk: Buffer) => {
-      stderrBuf += chunk.toString();
-      const lines = stderrBuf.split('\n');
-      stderrBuf = lines.pop() ?? '';
-      for (const line of lines) pushLog(runtime, `[priv-location:err] ${line}`);
-    });
-
-    proc.on('exit', (code, signal) => {
-      if (stdoutBuf) pushLog(runtime, `[priv-location] ${stdoutBuf}`);
-      if (stderrBuf) pushLog(runtime, `[priv-location:err] ${stderrBuf}`);
-      pushLog(runtime, `[priv-location] Script exited (code=${code}, signal=${signal})`);
-      runtime.privateLocationProcess = null;
-    });
   }
 
   getInstances(): InstanceView[] {
     const views: InstanceView[] = [];
 
     for (const [, runtime] of this.runtimes) {
-      const { config, status, esProcess, kibanaProcess, kibanaHealth, privateLocationProcess } = runtime;
+      const { config, status, esProcess, kibanaProcess, kibanaHealth, privateLocationEnabled } = runtime;
       views.push({
         name: config.name,
         type: config.type,
@@ -886,7 +956,7 @@ export class InstanceManager {
         kibanaHealth,
         url: `http://localhost:${config.kPort}`,
         dir: config.dir,
-        privLocationRunning: privateLocationProcess !== null,
+        privLocationRunning: privateLocationEnabled,
       });
     }
 
@@ -923,6 +993,15 @@ export class InstanceManager {
   }
 
   async shutdown(): Promise<void> {
+    // Clean up Docker containers for all private-location-enabled instances
+    for (const [name, runtime] of this.runtimes) {
+      if (runtime.privateLocationEnabled) {
+        runtime.privateLocationEnabled = false;
+        teardownPrivateLocation(name, () => {});
+        restoreKibanaDevYml(runtime.config.dir);
+      }
+    }
+
     const stops: Promise<string>[] = [];
     for (const [name, runtime] of this.runtimes) {
       if (runtime.status !== 'stopped') {

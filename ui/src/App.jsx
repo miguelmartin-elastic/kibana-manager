@@ -257,8 +257,8 @@ function InstanceCard({ inst, onRefresh }) {
       <div style={{ borderTop:'1px solid #1e2836', padding:'10px 16px', display:'flex', flexWrap:'wrap', gap:6 }}>
         {inst.kibanaHealth.up && <ActionBtn label="open" onClick={() => window.open(inst.url, '_blank')} />}
         <ActionBtn label="cursor" onClick={() => api.post(`/instances/${encodeURIComponent(inst.name)}/open`, {})} />
-        {!inst.tmuxRunning && !inst.privLocationRunning && <ActionBtn label="start" loading={busy==='start'} onClick={() => act('start', () => api.post(`/instances/${encodeURIComponent(inst.name)}/start`, {}))} />}
-        {inst.tmuxRunning && !inst.privLocationRunning && <ActionBtn label="stop" loading={busy==='stop'} onClick={() => act('stop', () => api.post(`/instances/${encodeURIComponent(inst.name)}/stop`, {}))} />}
+        {!inst.tmuxRunning && <ActionBtn label="start" loading={busy==='start'} onClick={() => act('start', () => api.post(`/instances/${encodeURIComponent(inst.name)}/start`, {}))} />}
+        {inst.tmuxRunning && <ActionBtn label="stop" loading={busy==='stop'} onClick={() => act('stop', () => api.post(`/instances/${encodeURIComponent(inst.name)}/stop`, {}))} />}
         {isFeat && <SwitchButton onSwitch={branch => act('switch', () => api.post('/instances/switch', { branch }))} busy={busy==='switch'} />}
         {!isPermanent && <ActionBtn danger label="kill" loading={busy==='kill'} onClick={() => act('kill', () => api.delete(`/instances/${encodeURIComponent(inst.branch)}`))} />}
         {!inst.privLocationRunning
